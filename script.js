@@ -58,7 +58,9 @@ document.addEventListener('DOMContentLoaded', function() {
         isWebXRSupported: false,
         vrSession: null,
         isMouseDown: false,
-        isMobile: /Mobi|Android/i.test(navigator.userAgent) // Detect mobile devices
+        isMobile: /Mobi|Android/i.test(navigator.userAgent), // Detect mobile devices
+        // Add a variable to track if a touch has started for swipe detection
+        touchStartTime: 0
     };
 
     // Setup lazy loading
@@ -183,6 +185,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Wait for A-Frame scene to be ready, then load the image
         waitForAFrameScene().then(() => {
+            // Preload the image to ensure it's in cache and ready for A-Frame
             const img = new Image();
             img.crossOrigin = 'anonymous';
 
@@ -193,55 +196,52 @@ document.addEventListener('DOMContentLoaded', function() {
                     elements.assets.removeChild(oldImage);
                 }
 
-                // Create new image element
+                // Create new image element and add to a-assets
                 const newImage = document.createElement('img');
                 newImage.id = 'current-sky-image';
                 newImage.src = imgSrc;
                 newImage.setAttribute('crossorigin', 'anonymous');
-
-                // Add to assets and update sky
                 elements.assets.appendChild(newImage);
 
-                // Force A-Frame to recognize the new asset
-                setTimeout(() => {
-                    elements.mainSky.setAttribute('src', '#current-sky-image');
+                // Set the sky source and handle A-Frame updates
+                elements.mainSky.setAttribute('src', '#current-sky-image');
 
-                    // Force scene refresh if needed
-                    const scene = document.querySelector('a-scene');
-                    if (scene && scene.renderer) {
-                        scene.renderer.render(scene.object3D, scene.camera);
-                    }
+                // Force A-Frame to recognize the new asset and render
+                const scene = document.querySelector('a-scene');
+                if (scene && scene.renderer) {
+                    scene.renderer.render(scene.object3D, scene.camera);
+                }
+
+                // Fade out loading message and show media info
+                setTimeout(() => {
+                    elements.loadingMessage.style.opacity = '0';
+                    setTimeout(() => {
+                        elements.loadingMessage.style.display = 'none';
+                    }, 500);
+
+                    elements.currentMediaName.textContent = mediaName;
+                    elements.mediaInfo.innerHTML = `Currently viewing: <strong>${mediaName}</strong>`;
+                    elements.mediaInfo.classList.add('visible');
+                    elements.vrNavControls.style.display = 'flex';
 
                     setTimeout(() => {
-                        elements.loadingMessage.style.opacity = '0';
+                        elements.mediaInfo.classList.remove('visible');
+                    }, 4000);
+
+                    state.skyImageLoaded = true;
+                    state.isTransitioning = false;
+
+                    // Force control panel to be visible after image loads
+                    setTimeout(() => {
+                        forceControlPanelVisible();
+                    }, 100);
+
+                    if (!state.isVRMode && !state.isFullscreen) {
                         setTimeout(() => {
-                            elements.loadingMessage.style.display = 'none';
-                        }, 500);
-
-                        elements.currentMediaName.textContent = mediaName;
-                        elements.mediaInfo.innerHTML = `Currently viewing: <strong>${mediaName}</strong>`;
-                        elements.mediaInfo.classList.add('visible');
-                        elements.vrNavControls.style.display = 'flex';
-
-                        setTimeout(() => {
-                            elements.mediaInfo.classList.remove('visible');
-                        }, 4000);
-
-                        state.skyImageLoaded = true;
-                        state.isTransitioning = false;
-
-                        // Force control panel to be visible after image loads
-                        setTimeout(() => {
-                            forceControlPanelVisible();
-                        }, 100);
-
-                        if (!state.isVRMode && !state.isFullscreen) {
-                            setTimeout(() => {
-                                showNotification('<i class="fas fa-info-circle"></i> Tip: Click VR button for enhanced experience, or fullscreen for immersive view', 5000);
-                            }, 1000);
-                        }
-                    }, 200);
-                }, 100);
+                            showNotification('<i class="fas fa-info-circle"></i> Tip: Click VR button for enhanced experience, or fullscreen for immersive view', 5000);
+                        }, 1000);
+                    }
+                }, 200); // Shorten this timeout for faster perceived loading
             };
 
             img.onerror = function(e) {
@@ -254,14 +254,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 }, 3000);
             };
 
-            // Preload the image to ensure it's in cache
-            const preloadLink = document.createElement('link');
-            preloadLink.href = imgSrc;
-            preloadLink.rel = 'preload';
-            preloadLink.as = 'image';
-            document.head.appendChild(preloadLink);
-
-            img.src = imgSrc; // Start loading the image
+            // Start loading the image
+            img.src = imgSrc;
         });
     }
 
@@ -435,7 +429,8 @@ document.addEventListener('DOMContentLoaded', function() {
             state.touchStartX = e.touches[0].clientX;
             state.touchStartY = e.touches[0].clientY;
             state.touchStartRotation = { ...state.cameraRotation };
-            e.preventDefault();
+            state.touchStartTime = Date.now(); // Record touch start time
+            e.preventDefault(); // Prevent default to avoid scrolling/zooming
         }
     }
 
@@ -453,7 +448,7 @@ document.addEventListener('DOMContentLoaded', function() {
             ));
 
             updateCameraRotation();
-            e.preventDefault();
+            e.preventDefault(); // Prevent default to avoid scrolling/zooming
         }
     }
 
@@ -462,23 +457,25 @@ document.addEventListener('DOMContentLoaded', function() {
         if (state.isMobile && state.isInVRView && state.skyImageLoaded) {
             const deltaX = e.changedTouches[0].clientX - state.touchStartX;
             const deltaY = e.changedTouches[0].clientY - state.touchStartY;
+            const touchDuration = Date.now() - state.touchStartTime;
 
             const swipeThreshold = 75; // Minimum distance for a swipe
             const timeThreshold = 300; // Maximum time for a swipe (ms)
 
             // Check if it's a horizontal swipe and not a vertical scroll attempt
-            if (Math.abs(deltaX) > swipeThreshold && Math.abs(deltaX) > Math.abs(deltaY) * 1.5) {
-                // Assuming a quick swipe
-                if (e.timeStamp - (e.targetTouches[0]?.timeStamp || 0) < timeThreshold) { // Check if touchstart timestamp is available
-                    backToHomePage();
-                    return; // Prevent further processing if it's a swipe
-                }
+            if (Math.abs(deltaX) > swipeThreshold && Math.abs(deltaX) > Math.abs(deltaY) * 1.5 && touchDuration < timeThreshold) {
+                // It's a horizontal swipe
+                console.log('Horizontal swipe detected, returning to home page.');
+                backToHomePage();
+                e.preventDefault(); // Prevent default browser navigation
+                return;
             }
         }
 
         // Reset touch state
         state.touchStartX = 0;
         state.touchStartY = 0;
+        state.touchStartTime = 0;
     }
 
     function handleMobileTap() {
